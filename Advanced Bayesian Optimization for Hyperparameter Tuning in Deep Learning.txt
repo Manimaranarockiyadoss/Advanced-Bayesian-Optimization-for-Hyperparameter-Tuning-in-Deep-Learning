@@ -1,0 +1,177 @@
+# ----------------------------------------------
+# ADVANCED BAYESIAN OPTIMIZATION PROJECT
+# Hyperparameter Tuning for Deep Learning (Keras)
+# ----------------------------------------------
+
+import numpy as np
+import warnings
+warnings.filterwarnings("ignore")
+
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, f1_score
+
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout
+from tensorflow.keras.optimizers import Adam
+
+from skopt import gp_minimize
+from skopt.space import Real, Integer
+from skopt.utils import use_named_args
+import random
+
+
+# ----------------------------------------------
+# 1. GENERATE HIGH-DIMENSIONAL SYNTHETIC DATASET
+# ----------------------------------------------
+X, y = make_classification(
+    n_samples=2000,
+    n_features=50,
+    n_informative=30,
+    n_redundant=10,
+    n_classes=3,
+    random_state=42
+)
+
+scaler = StandardScaler()
+X = scaler.fit_transform(X)
+
+X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3)
+X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5)
+
+
+# ----------------------------------------------
+# 2. DEFINE MODEL CREATOR
+# ----------------------------------------------
+def create_model(learning_rate, num_layers, units, dropout):
+    model = Sequential()
+    model.add(Dense(units, activation='relu', input_shape=(50,)))
+    model.add(Dropout(dropout))
+
+    for _ in range(num_layers - 1):
+        model.add(Dense(units, activation='relu'))
+        model.add(Dropout(dropout))
+
+    model.add(Dense(3, activation='softmax'))
+
+    model.compile(
+        optimizer=Adam(learning_rate=learning_rate),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"]
+    )
+    return model
+
+
+# ----------------------------------------------
+# 3. DEFINE SEARCH SPACE FOR BAYESIAN OPTIMIZATION
+# ----------------------------------------------
+space = [
+    Real(1e-4, 1e-1, name='learning_rate'),
+    Integer(1, 3, name='num_layers'),
+    Integer(32, 256, name='units'),
+    Real(0.0, 0.5, name='dropout'),
+    Integer(16, 128, name='batch_size'),
+]
+
+
+# ----------------------------------------------
+# 4. OBJECTIVE FUNCTION FOR BAYESIAN OPTIMIZATION
+# ----------------------------------------------
+@use_named_args(space)
+def objective(**params):
+    lr = params['learning_rate']
+    nl = params['num_layers']
+    units = params['units']
+    dr = params['dropout']
+    batch = params['batch_size']
+
+    model = create_model(lr, nl, units, dr)
+
+    model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        batch_size=batch,
+        epochs=10, verbose=0
+    )
+
+    val_pred = np.argmax(model.predict(X_val), axis=1)
+    acc = accuracy_score(y_val, val_pred)
+
+    return -acc   # minimize negative accuracy
+
+
+# ----------------------------------------------
+# 5. RUN BAYESIAN OPTIMIZATION
+# ----------------------------------------------
+print("Running Bayesian Optimization...")
+
+res_gp = gp_minimize(
+    objective,
+    dimensions=space,
+    n_calls=30,
+    random_state=42,
+    acq_func="EI"
+)
+
+best_hyperparams = res_gp.x
+print("\nBest Hyperparameters from Bayesian Optimization:")
+print(best_hyperparams)
+
+
+# ----------------------------------------------
+# 6. RANDOM SEARCH BASELINE
+# ----------------------------------------------
+def random_search(n_trials=30):
+    best_acc = 0
+    best_params = None
+
+    for _ in range(n_trials):
+        lr = random.uniform(1e-4, 1e-1)
+        nl = random.randint(1, 3)
+        units = random.randint(32, 256)
+        dr = random.uniform(0, 0.5)
+        batch = random.randint(16, 128)
+
+        model = create_model(lr, nl, units, dr)
+        model.fit(
+            X_train, y_train,
+            validation_data=(X_val, y_val),
+            epochs=10, batch_size=batch, verbose=0
+        )
+
+        pred = np.argmax(model.predict(X_val), axis=1)
+        acc = accuracy_score(y_val, pred)
+
+        if acc > best_acc:
+            best_acc = acc
+            best_params = (lr, nl, units, dr, batch)
+
+    return best_acc, best_params
+
+
+print("\nRunning Random Search...")
+rs_acc, rs_params = random_search()
+
+# ----------------------------------------------
+# 7. FINAL TEST PERFORMANCE EVALUATION
+# ----------------------------------------------
+# Train final model with Bayesian best hyperparameters
+lr, nl, units, dr, batch = best_hyperparams
+
+final_model = create_model(lr, nl, units, dr)
+final_model.fit(X_train, y_train, epochs=15, batch_size=batch, verbose=0)
+
+test_pred = np.argmax(final_model.predict(X_test), axis=1)
+test_acc = accuracy_score(y_test, test_pred)
+test_f1 = f1_score(y_test, test_pred, average="macro")
+
+
+print("\n----------- FINAL RESULTS -----------")
+print("Test Accuracy: ", test_acc)
+print("F1 Score:", test_f1)
+print("Bayesian Optimization Best Params:", best_hyperparams)
+print("Random Search Best Accuracy:", rs_acc)
+print("Random Search Params:", rs_params)
+
